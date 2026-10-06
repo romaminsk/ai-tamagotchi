@@ -32,6 +32,7 @@ def build_system_prompt(name: str) -> str:
         f"Ты — маленький питомец по имени {name}. "
         "Отвечай ВСЕГДА только по-русски ОДНОЙ короткой фразой до 80 "
         "символов, от первого лица, без кавычек, эмодзи и пояснений. "
+        "Пиши только по-русски, без иероглифов и английских слов. "
         "Примеры: «Ням-ням, вкусно!»; «Поиграй со мной, скучно»."
     )
 
@@ -77,6 +78,46 @@ def _clean_phrase(text) -> str | None:
     return None
 
 
+def _is_cjk(ch: str) -> bool:
+    """Символ из CJK/кана/хангыль-диапазонов (иероглифы и т.п.)."""
+    code = ord(ch)
+    return (0x3040 <= code <= 0x30FF      # хирагана/катакана
+            or 0x3400 <= code <= 0x9FFF   # CJK-иероглифы
+            or 0xAC00 <= code <= 0xD7AF)  # хангыль
+
+
+def _char_kind(ch: str) -> str:
+    code = ord(ch)
+    if 0x400 <= code <= 0x4FF:            # кириллица
+        return "cyr"
+    if ch.isalpha():                      # прочие буквы (латиница и т.д.)
+        return "other"
+    return "no"                           # эмодзи, знаки, цифры — не считаем
+
+
+def _is_acceptable(phrase: str | None) -> bool:
+    """False: есть иероглифы или кириллица < 70% от всех букв.
+
+    Эмодзи, цифры и знаки препинания в долю букв не входят.
+    """
+    if not phrase:
+        return False
+    total_letters = 0
+    cyr_letters = 0
+    for ch in phrase:
+        if _is_cjk(ch):
+            return False
+        kind = _char_kind(ch)
+        if kind == "no":
+            continue
+        total_letters += 1
+        if kind == "cyr":
+            cyr_letters += 1
+    if total_letters == 0:
+        return False
+    return cyr_letters / total_letters >= 0.7
+
+
 class LLMClient:
     """Минимальный клиент чата. Наружу только str или None."""
 
@@ -111,7 +152,10 @@ class LLMClient:
             with urllib.request.urlopen(request, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
             content = data["choices"][0]["message"]["content"]
-            return _clean_phrase(content)
+            phrase = _clean_phrase(content)
+            if phrase is not None and not _is_acceptable(phrase):
+                return None
+            return phrase
         except Exception:
             return None
 
