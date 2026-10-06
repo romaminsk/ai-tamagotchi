@@ -142,15 +142,6 @@ def run_smoke(config) -> int:
     app = TamagotchiApp(root, config, pet, tick_ms=100)
     ticks_done = {"n": 0}
 
-    def do_three_ticks():
-        app.pet.tick()
-        ticks_done["n"] += 1
-        app.render()
-        if ticks_done["n"] < 3:
-            root.after(50, do_three_ticks)
-        else:
-            root.after(50, do_action)
-
     closed = {"flag": False}
 
     def do_three_ticks():
@@ -173,9 +164,35 @@ def run_smoke(config) -> int:
         except tk.TclError:
             pass
 
+    def check_buttons_layout() -> int:
+        """Кнопки маппятся и целиком внутри окна."""
+        root.update_idletasks()
+        win_top = root.winfo_rooty()
+        win_bottom = win_top + root.winfo_height()
+        problems = []
+        for index, btn in sorted(app.buttons.items()):
+            if not btn.winfo_ismapped():
+                problems.append(f"кнопка {index} не отображена")
+                continue
+            bottom = btn.winfo_rooty() + btn.winfo_height()
+            if bottom > win_bottom:
+                problems.append(
+                    f"кнопка {index} выступает на {bottom - win_bottom}px")
+        if problems:
+            print("[SMOKE FAIL] раскладка кнопок:")
+            for problem in problems:
+                print("  -", problem)
+            return 1
+        print("[SMOKE OK] все 4 кнопки отображены и внутри окна")
+        return 0
+
+    layout_exit = None
+
     try:
         root.after(300, do_three_ticks)
+        root.update_idletasks()
         root.update()
+        layout_exit = check_buttons_layout()
         deadline = time.monotonic() + 30
         while not closed["flag"] and time.monotonic() < deadline:
             still_open = True
@@ -198,6 +215,8 @@ def run_smoke(config) -> int:
             pass
     if ticks_done["n"] != 3:
         print(f"[SMOKE FAIL] тиков {ticks_done['n']}, ожидалось 3")
+        return 1
+    if layout_exit not in (0, None):
         return 1
     print("[SMOKE OK] окно, 3 тика и действие выполены")
     return 0

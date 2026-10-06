@@ -15,7 +15,8 @@ from .llm import (LLMClient, LLMWorker, PhraseScheduler, PRIO_ACTION,
                   PRIO_IDLE, PRIO_MOOD)
 from .pet import TICK_SECONDS, Pet
 
-W, H = 480, 560
+W, H = 480, 720
+MIN_H = 680
 CANVAS_H = 380
 CHECK_MS = 30_000        # период проверки доступности Ollama, мс
 IDLE_CHECK_MS = 2_000
@@ -59,10 +60,12 @@ class TamagotchiApp:
 
         self.root.title(f"Тамагочи: {config['PET_NAME']}")
         self.root.geometry(f"{W}x{H}")
-        self.root.resizable(False, False)
+        self.root.minsize(W, MIN_H)
+        self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build()
+        self._fit_window_height()
         self._bind_keys()
 
         # Ollama: проверка на старте и каждые 30 с (отдельный поток)
@@ -83,42 +86,60 @@ class TamagotchiApp:
         self.status_label = ttk.Label(self.root, text="LLM: офлайн")
         self.status_label.pack(side=tk.TOP, anchor="w", padx=8, pady=4)
 
-        self.canvas = tk.Canvas(self.root, width=W, height=CANVAS_H,
-                                name="scene", highlightthickness=0)
-        self.canvas.pack(fill="x")
+        # нижние блоки: сначала кнопки (самый низ), затем подсказка,
+        # полосы, пузырь — Canvas добавляется последним и отделяет место
+        panel = ttk.Frame(self.root)
+        panel.pack(side=tk.BOTTOM, fill="x", padx=6, pady=6)
+        self.buttons = {}
+        for column, (title, handler) in enumerate((
+                ("🍖 Покормить [1]", self._feed),
+                ("🎾 Играть [2]", self._play),
+                ("😴 Спать [3]", self._sleep_toggle),
+                ("🛁 Помыть [4]", self._clean))):
+            panel.columnconfigure(column, weight=1)
+            btn = ttk.Button(panel, text=title, command=handler)
+            btn.grid(row=0, column=column, padx=4, pady=2, sticky="nsew")
+            self.buttons[column + 1] = btn
+
+        hint = ("Нажимай кнопки или клавиши 1-4. Следи за полосами: "
+                "когда они падают, питомцу плохо.")
+        self.hint_label = ttk.Label(self.root, text=hint, wraplength=W - 40,
+                                    justify="center", foreground="#555")
+        self.hint_label.pack(side=tk.BOTTOM, fill="x", padx=16, pady=4)
+
+        bars_box = ttk.Frame(self.root)
+        bars_box.pack(side=tk.BOTTOM, fill="x", padx=14)
+        self.bars = {}
+        for title, key in (("Сытость", "hunger"), ("Энергия", "energy"),
+                           ("Веселье", "fun"), ("Чистота", "hygiene")):
+            row = ttk.Frame(bars_box)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=title, width=9).pack(side=tk.LEFT)
+            bar = ttk.Progressbar(row, maximum=100, mode="determinate")
+            bar.pack(side=tk.LEFT, fill="x", expand=True)
+            self.bars[key] = bar
+
+        self.mood_label = ttk.Label(bars_box, text="Настроение: —")
+        self.mood_label.pack(pady=2)
 
         self.speech = ttk.Label(self.root, text="", wraplength=W - 60,
                                 justify="center", relief="solid",
                                 padding=8, font=("TkDefaultFont", 12))
-        self.speech.pack(pady=8, padx=24, fill="x")
+        self.speech.pack(side=tk.BOTTOM, fill="x", padx=24, pady=8)
         self.set_speech(f"Привет! Я {self.config['PET_NAME']}.")
-        self.speech.config(text=f"Привет! Я {self.config['PET_NAME']}.")
 
-        self.bars = {}
-        for title, key in (("Сытость", "hunger"), ("Энергия", "energy"),
-                           ("Веселье", "fun"), ("Чистота", "hygiene")):
-            row = ttk.Frame(self.root)
-            row.pack(fill="x", padx=14, pady=3)
-            ttk.Label(row, text=title, width=9).pack(side=tk.LEFT)
-            bar = ttk.Progressbar(row, maximum=100, length=W - 120,
-                                  mode="determinate")
-            bar.pack(side=tk.LEFT, fill="x", expand=True)
-            self.bars[key] = bar
+        # Canvas — последним: растягивается (expand) и отдаёт место
+        self.canvas = tk.Canvas(self.root, width=W, height=CANVAS_H,
+                                name="scene", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        self.mood_label = ttk.Label(self.root, text="Настроение: —")
-        self.mood_label.pack(pady=2)
-
-        panel = ttk.Frame(self.root)
-        panel.pack(pady=6)
-        self.buttons = {}
-        for row_index, (title, handler) in enumerate((
-                ("1: Покормить", self._feed), ("2: Играть", self._play),
-                ("3: Спать/Разбудить", self._sleep_toggle),
-                ("4: Помыть", self._clean))):
-            btn = ttk.Button(panel, text=title, command=handler, width=19)
-            btn.grid(row=row_index // 2, column=row_index % 2, padx=6,
-                     pady=4)
-            self.buttons[row_index + 1] = btn
+    def _fit_window_height(self):
+        """Если контент требует больше места — растягиваем окно по высоте."""
+        self.root.update_idletasks()
+        required = self.root.winfo_reqheight()
+        current = self.root.winfo_height()
+        if required > current:
+            self.root.geometry(f"{W}x{required}")
 
     def _bind_keys(self):
         for key, index in (("1", 1), ("2", 2), ("3", 3), ("4", 4)):
@@ -143,25 +164,27 @@ class TamagotchiApp:
         canvas.delete("all")
         p = sprite.sprite_params(self.pet.mood(), self.blink, self._bounce())
         night = self._night_mode()
+        cw = max(W, canvas.winfo_width())
+        ch = max(220, canvas.winfo_height())
 
         canvas.configure(bg="#101c33" if night else "#cde9f7")
         if night:
-            canvas.create_oval(W - 80, 26, W - 30, 76, fill="#f5f2da",
+            canvas.create_oval(cw - 80, 26, cw - 30, 76, fill="#f5f2da",
                                outline="")
             for x, y, s in ((40, 40, 2), (110, 66, 3), (178, 44, 2),
                             (300, 58, 3), (250, 36, 2)):
                 canvas.create_oval(x - s, y - s, x + s, y + s, fill="#e8eeff",
                                    outline="")
         else:
-            canvas.create_oval(W - 96, 18, W - 34, 80, fill="#ffe066",
+            canvas.create_oval(cw - 96, 18, cw - 34, 80, fill="#ffe066",
                                outline="")
 
-        ground_y = CANVAS_H - 36
-        canvas.create_rectangle(0, ground_y, W, CANVAS_H,
+        ground_y = ch - 36
+        canvas.create_rectangle(0, ground_y, cw, ch,
                                 fill="#8bbf6a" if not night else "#274227",
                                 width=0)
 
-        cx = W // 2
+        cx = cw // 2
         cy = ground_y - 66 + int(p["bounce"])
         r = 52
         accent, body = p["accent"], p["body"]
@@ -251,8 +274,10 @@ class TamagotchiApp:
                                font=("TkDefaultFont", 11, "italic"))
 
         canvas.create_text(10, 10, anchor="nw",
-                           text=f"{self.pet.name}, тиков: "
-                                f"{self.pet.age_ticks}",
+                           text=(f"{self.pet.name} · настроение: "
+                                 + MOOD_LABELS.get(self.pet.mood(),
+                                                   self.pet.mood())
+                                   .replace("Настроение: ", "")),
                            fill="#eef" if night else "#333")
 
         for key, bar in self.bars.items():
@@ -270,8 +295,9 @@ class TamagotchiApp:
                                  else "#a25353")
         self.mood_label.config(
             text=MOOD_LABELS.get(self.pet.mood(), self.pet.mood()))
-        self.buttons[3].config(text=("3: Разбудить" if self.pet.sleeping
-                                     else "3: Спать"))
+        self.buttons[3].config(text=("⏰ Разбудить [3]" if self.pet.sleeping
+                                     else "😴 Спать [3]"))
+        panel = self.buttons[1].master
 
     def set_speech(self, text):
         if isinstance(text, str) and text:

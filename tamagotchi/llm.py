@@ -27,19 +27,39 @@ KIND_LABEL = {PRIO_ACTION: "action", PRIO_MOOD: "mood", PRIO_IDLE: "idle"}
 
 
 def build_system_prompt(name: str) -> str:
-    """Системный промпт: питомец, одна короткая фраза, примеры."""
+    """Системный промпт: дерзкий питомец, одна фраза, правила безопасности."""
     return (
         f"Ты — маленький питомец по имени {name}. "
-        "Отвечай ВСЕГДА только по-русски ОДНОЙ короткой фразой до 80 "
-        "символов, от первого лица, без кавычек, эмодзи и пояснений. "
-        "Пиши только по-русски, без иероглифов и английских слов. "
-        "Примеры: «Ням-ням, вкусно!»; «Поиграй со мной, скучно»."
+        "У тебя чёрный юмор: ты саркастичный, дерзкий, любишь жёсткие "
+        "приколы, самоиронию и абсурд. Каждый раз заходишь на фразу заново, "
+        "придумывай новый ход. Отвечай ВСЕГДА только по-русски ОДНОЙ "
+        "короткой фразой до 80 символов, от первого лица, без кавычек, "
+        "эмодзи и пояснений. Пиши только по-русски, без иероглифов "
+        "и английских слов. Без мата. Не оскорбляй людей и животных "
+        "по национальности, религии, здоровью и любым другим признакам. "
+        "Без призывов к насилию над людьми. Обижать позволено только "
+        "себя, свою миску и ошейник. Примеры: «Ням-ням, вкусно!»; "
+        "«Миска пуста, и я уже пишу жалобу»."
     )
 
 
+STYLES = (
+    "сарказм",
+    "угроза расправы над миской",
+    "философский мрак",
+    "жалоба на жизнь",
+    "ложная скромность",
+    "пассивная агрессия",
+    "театральная драма",
+    "мания величия",
+)
+
+
 def build_user_message(name: str, mood: str, params: dict,
-                       event: str | None) -> str:
-    """User-сообщение строит код: настроение, параметры, событие. Истории нет."""
+                       event: str | None, style: str | None = None,
+                       seed: int | None = None,
+                       recent: list[str] | None = None) -> str:
+    """User-сообщение: настроение, параметры, событие, стиль, зерно, антиповтор."""
     stats = (
         f"сытость={float(params.get('hunger', 0)):.0f}, "
         f"энергия={float(params.get('energy', 0)):.0f}, "
@@ -54,7 +74,7 @@ def build_user_message(name: str, mood: str, params: dict,
         "too_tired": "питомец слишком устал, чтобы играть",
         "sleep_started": "питомец лёг спать",
         "woke_up": "питомец проснулся",
-        "not_sleepy": "питомцу предложили спать, но он не wants спать",
+        "not_sleepy": "питомцу предложили спать, но он не хочет спать",
         "cleaned": "питомца только что помыли",
         "is_sleeping": "к питомцу обратились, но он спит",
         "not_sleeping": "питомца хотели разбудить, но он не спит",
@@ -63,6 +83,13 @@ def build_user_message(name: str, mood: str, params: dict,
     }
     if event:
         parts.append(f"Событие: {events.get(event, event)}.")
+    if style:
+        parts.append(f"Стиль реплики: {style}.")
+    if seed is not None:
+        parts.append(f"Заход №{seed}.")
+    if recent:
+        joined = "; ".join(f"«{p}»" for p in recent)
+        parts.append(f"Не повторяй эти фразы: {joined}.")
     parts.append("Скажи одну короткую фразу от первого лица.")
     return " ".join(parts)
 
@@ -121,25 +148,44 @@ def _is_acceptable(phrase: str | None) -> bool:
 class LLMClient:
     """Минимальный клиент чата. Наружу только str или None."""
 
-    def __init__(self, ollama_url: str, model: str, timeout: float = 60.0):
+    RECENT_LIMIT = 5
+
+    def __init__(self, ollama_url: str, model: str, timeout: float = 60.0,
+                 rng: random.Random | None = None):
         self.ollama_url = ollama_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self._rng = rng or random.Random()
+        self.recent: list[str] = []  # последние 5 принятых реплик
 
     # ——— запросы ———
 
+    def _pick_style(self) -> str:
+        return self._rng.choice(STYLES)
+
+    def _remember(self, phrase: str) -> None:
+        self.recent.append(phrase)
+        if len(self.recent) > self.RECENT_LIMIT:
+            del self.recent[:len(self.recent) - self.RECENT_LIMIT]
+
     def chat(self, name: str, mood: str, params: dict,
              event: str | None) -> str | None:
-        """Возвращает чистую фразу или None (ошибка/пустой ответ)."""
+        """Возвращает чистую фразу или None (ошибка/пустой ответ/повтор)."""
         try:
+            user_message = build_user_message(
+                name, mood, params, event,
+                style=self._pick_style(),
+                seed=self._rng.randint(1, 99999),
+                recent=list(self.recent),
+            )
             payload = json.dumps({
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": build_system_prompt(name)},
-                    {"role": "user", "content": build_user_message(
-                        name, mood, params, event)},
+                    {"role": "user", "content": user_message},
                 ],
-                "temperature": 0.8,
+                "temperature": 1.0,
+                "top_p": 0.95,
                 "max_tokens": 60,
                 "stream": False,
             }).encode("utf-8")
@@ -153,8 +199,11 @@ class LLMClient:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
             content = data["choices"][0]["message"]["content"]
             phrase = _clean_phrase(content)
-            if phrase is not None and not _is_acceptable(phrase):
+            if phrase is None or not _is_acceptable(phrase):
                 return None
+            if phrase in self.recent:  # антиповтор: непроходная
+                return None
+            self._remember(phrase)
             return phrase
         except Exception:
             return None
