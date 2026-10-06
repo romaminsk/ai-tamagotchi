@@ -4,8 +4,24 @@ TICK_SECONDS = 5
 
 START = {"hunger": 80.0, "energy": 80.0, "fun": 80.0, "hygiene": 80.0}
 
-AWAKE_DECAY = {"hunger": -1.0, "energy": -0.6, "fun": -0.8, "hygiene": -0.5}
-SLEEP_DECAY = {"hunger": -0.4, "energy": +2.5, "fun": -0.2, "hygiene": -0.2}
+# Энергия: в бодрствовании тратится втрое медленнее прежнего (-0.6 -> -0.2),
+# во сне растё втрое быстрее прежнего (+2.5 -> +7.5).
+# Восстановление с низкого уровня: 100/7.5 ≈ 14 тиков ≈ 70 секунд < 2-3 мин.
+ENERGY_AWAKE_LOSS = -0.2
+ENERGY_SLEEP_GAIN = 7.5
+
+AWAKE_DECAY = {
+    "hunger": -1.0,
+    "energy": ENERGY_AWAKE_LOSS,
+    "fun": -0.8,
+    "hygiene": -0.5,
+}
+SLEEP_DECAY = {
+    "hunger": -0.4,
+    "energy": ENERGY_SLEEP_GAIN,
+    "fun": -0.2,
+    "hygiene": -0.2,
+}
 
 _P = ("hunger", "energy", "fun", "hygiene")
 

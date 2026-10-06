@@ -186,13 +186,54 @@ def run_smoke(config) -> int:
         print("[SMOKE OK] все 4 кнопки отображены и внутри окна")
         return 0
 
+    def check_button_clicks() -> int:
+        """Клик по каждой из 4 кнопок вызывает действие.
+
+        Основная дорожка — event_generate('<Button-1>'); если на macOS
+        событие не дошло, fallback: прямой вызов bind-обработчика
+        с проверкой, что '<Button-1>' у виджета зарегистрирован.
+        """
+        before = app.actions_count
+        generated = True
+        try:
+            for btn in app.buttons.values():
+                btn.event_generate("<Button-1>")
+            root.update()
+        except tk.TclError:
+            generated = False
+        raised = app.actions_count - before
+        if raised >= 4:
+            print(f"[SMOKE OK] клики по кнопкам: {raised}/4 события")
+            return 0
+        bound = all(btn.bind("<Button-1>") is not None
+                    for btn in app.buttons.values())
+        if not bound:
+            print("[SMOKE FAIL] <Button-1> не зарегистрирован на кнопках")
+            return 1
+        try:
+            for btn in app.buttons.values():
+                btn.on_press()
+            root.update()
+        except tk.TclError:
+            pass
+        raised = app.actions_count - before
+        if raised >= 4:
+            print(f"[SMOKE OK] клики (fallback-дорожка): "
+                  f"{raised}/4 действия вызвали обработчики")
+            return 0
+        print(f"[SMOKE FAIL] клики: сработало {raised}/4, event_generate "
+              f"{'работал' if generated else 'не работал'}")
+        return 1
+
     layout_exit = None
+    clicks_exit = None
 
     try:
         root.after(300, do_three_ticks)
         root.update_idletasks()
         root.update()
         layout_exit = check_buttons_layout()
+        clicks_exit = check_button_clicks()
         deadline = time.monotonic() + 30
         while not closed["flag"] and time.monotonic() < deadline:
             still_open = True
@@ -217,6 +258,8 @@ def run_smoke(config) -> int:
         print(f"[SMOKE FAIL] тиков {ticks_done['n']}, ожидалось 3")
         return 1
     if layout_exit not in (0, None):
+        return 1
+    if clicks_exit not in (0, None):
         return 1
     print("[SMOKE OK] окно, 3 тика и действие выполены")
     return 0

@@ -19,7 +19,7 @@ class PetTests(unittest.TestCase):
         pet = Pet()
         pet.tick()
         self.assertAlmostEqual(pet.hunger, 79.0)
-        self.assertAlmostEqual(pet.energy, 79.4)
+        self.assertAlmostEqual(pet.energy, 79.8)
         self.assertAlmostEqual(pet.fun, 79.2)
         self.assertAlmostEqual(pet.hygiene, 79.5)
         self.assertEqual(pet.age_ticks, 1)
@@ -34,7 +34,7 @@ class PetTests(unittest.TestCase):
         pet.tick()
         self.assertEqual(TICK_SECONDS, 5)
         self.assertTrue(pet.sleeping)
-        self.assertAlmostEqual(pet.energy, 52.5)
+        self.assertAlmostEqual(pet.energy, 57.5)
         self.assertAlmostEqual(pet.hunger, 49.6)
         self.assertAlmostEqual(pet.fun, 49.8)
         self.assertAlmostEqual(pet.hygiene, 49.8)
@@ -146,6 +146,42 @@ class PetTests(unittest.TestCase):
             pet.tick()
         for key in ("hunger", "energy", "fun", "hygiene"):
             self.assertGreaterEqual(getattr(pet, key), 0.0)
+
+    def test_energy_balance_awake_vs_sleep(self):
+        """60 тиков бодрствования: падение меньше, чем прирост за 60 тиков сна.
+
+        Сон-питомцу замораживаем авто-пробуждение (wake), чтобы измерить
+        чистую скорость, а не эффект пробуждения на 100 энергии.
+        """
+        awake = Pet()
+        awake.energy = 80.0
+        for _ in range(60):
+            awake.tick()
+
+        sleeping = Pet()
+        sleeping.energy = 10.0
+        sleeping.sleeping = True
+        sleeping.wake = lambda: "wake_disabled"  # чистый сон для замера
+        for _ in range(60):
+            sleeping.tick()
+        sleep_gain = sleeping.energy - 10.0
+
+        awake_loss = 80.0 - awake.energy
+        self.assertAlmostEqual(awake_loss, 12.0)     # 60 × 0.2
+        self.assertAlmostEqual(sleep_gain, 90.0)     # 60 × 7.5 -> clamp 100
+        self.assertGreater(sleep_gain, awake_loss)
+
+    def test_sleep_recovers_capped_36_ticks(self):
+        """Сон с энергии 10 достигает ≥90 не более чем за 36 тиков (3 мин)."""
+        pet = Pet()
+        pet.energy = 10.0
+        pet.sleeping = True
+        ticks = 0
+        while pet.energy < 90 and ticks < 36:
+            pet.tick()
+            ticks += 1
+        self.assertLessEqual(ticks, 36)
+        self.assertGreaterEqual(pet.energy, 90.0)
 
     def test_roundtrip(self):
         pet = Pet()

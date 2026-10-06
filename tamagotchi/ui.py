@@ -18,11 +18,8 @@ from .pet import TICK_SECONDS, Pet
 W, H = 480, 720
 MIN_H = 680
 CANVAS_H = 380
-CHECK_MS = 30_000        # период проверки доступности Ollama, мс
-IDLE_CHECK_MS = 2_000
-ANIM_MS = 120
-POLL_MS = 150            # забор результатов воркера, мс
-SAVE_EVERY_TICKS = 30
+BTN_FONT = 14
+BTN_PRESS_MS = 130      # эффект нажатия, мс
 
 MOOD_LABELS = {
     "happy": "Настроение: счастлив",
@@ -33,6 +30,96 @@ MOOD_LABELS = {
     "sad": "Настроение: грустный",
     "sleeping": "Настроение: спит",
 }
+
+BTN_BG = "#37474f"
+BTN_FG = "#eceff1"
+BTN_BG_PRESS = "#78909c"
+BTN_DISABLE_NOTE = ""
+
+
+class BigButton(tk.Label):
+    """own-виджет кнопки: Label + bind кликов (надёжно на macOS Aqua).
+
+    tk.Button/ttk.Button на Aqua игнорируют bg/fg и срабатывают только
+    по ButtonRelease «точно внутри» виджета; здесь действие привязано
+    к <Button-1>, с эффектом нажатия и курсором hand2.
+    """
+
+    def __init__(self, master, title: str, command):
+        super().__init__(master, text=title, bg=BTN_BG, fg=BTN_FG,
+                         font=("TkDefaultFont", BTN_FONT, "bold"),
+                         padx=10, pady=10, cursor="hand2",
+                         relief="raised", bd=1)
+        self._title_base = title
+        self._command = command
+        self._press_job = None
+        self._armed = False           # флаг занятости эффекта, не блокирует
+        self._press_flowing = False   # ok для тестов
+        self.bind("<Button-1>", self.on_press)
+        self.bind("<ButtonRelease-1>", self.on_release)
+        self.bind("<Enter>", lambda e: self._set_hover())
+        self.bind("<Leave>", lambda e: self._set_idle())
+
+    def _set_idle(self):
+        try:
+            self.configure(bg=BTN_BG)
+        except tk.TclError:
+            pass
+
+    def _set_hover(self):
+        try:
+            self.configure(bg="#455a64")
+        except tk.TclError:
+            pass
+
+    def on_press(self, _event=None):
+        if self._press_flowing:
+            return  # не дублируем, пока эффект активен
+        self._press_flowing = True
+        try:
+            self.configure(bg=BTN_BG_PRESS)
+        except tk.TclError:
+            pass
+        self.click()
+        # цвет вернётся в исходный через BTN_PRESS_MS либо при release
+        self._press_job = self.after(BTN_PRESS_MS, self._restore)
+
+    def on_release(self, _event=None):
+        if self._press_flowing and self._press_job is None:
+            # release пришёл раньше таймера — восстановить немедленно
+            self._restore()
+
+    def _restore(self):
+        try:
+            if self._press_job is not None:
+                self.after_cancel(self._press_job)
+        except tk.TclError:
+            pass
+        self._press_job = None
+        self._press_flowing = False
+        try:
+            self.configure(bg=BTN_BG)
+        except tk.TclError:
+            pass
+
+    def click(self):
+        """Общая точка для кликов и клавиш."""
+        self._command()
+
+    def invoke(self):
+        # совместимость со смоуком/клавишами
+        self.click()
+
+    def set_title(self, title: str):
+        self._title_base = title
+        self.configure(text=title)
+
+
+CHECK_MS = 30_000        # период проверки доступности Ollama, мс
+IDLE_CHECK_MS = 2_000
+ANIM_MS = 120
+POLL_MS = 150            # забор результатов воркера, мс
+SAVE_EVERY_TICKS = 30
 
 
 class TamagotchiApp:
@@ -57,6 +144,7 @@ class TamagotchiApp:
         self._save_counter = 0
         self._last_mood = pet.mood()
         self._greet_done = False
+        self.actions_count = 0  # для смоук-проверки кликов
 
         self.root.title(f"Тамагочи: {config['PET_NAME']}")
         self.root.geometry(f"{W}x{H}")
@@ -88,24 +176,25 @@ class TamagotchiApp:
 
         # нижние блоки: сначала кнопки (самый низ), затем подсказка,
         # полосы, пузырь — Canvas добавляется последним и отделяет место
-        panel = ttk.Frame(self.root)
+        panel = tk.Frame(self.root, bg="#263238")
         panel.pack(side=tk.BOTTOM, fill="x", padx=6, pady=6)
         self.buttons = {}
         for column, (title, handler) in enumerate((
-                ("🍖 Покормить [1]", self._feed),
-                ("🎾 Играть [2]", self._play),
-                ("😴 Спать [3]", self._sleep_toggle),
-                ("🛁 Помыть [4]", self._clean))):
-            panel.columnconfigure(column, weight=1)
-            btn = ttk.Button(panel, text=title, command=handler)
-            btn.grid(row=0, column=column, padx=4, pady=2, sticky="nsew")
+                ("🍖 Кормить 1", self._feed),
+                ("🎾 Играть 2", self._play),
+                ("😴 Спать 3", self._sleep_toggle),
+                ("🛁 Мыть 4", self._clean))):
+            panel.columnconfigure(column, weight=1, uniform="btn")
+            btn = BigButton(panel, title, handler)
+            btn.grid(row=0, column=column, sticky="nsew")
             self.buttons[column + 1] = btn
 
         hint = ("Нажимай кнопки или клавиши 1-4. Следи за полосами: "
                 "когда они падают, питомцу плохо.")
-        self.hint_label = ttk.Label(self.root, text=hint, wraplength=W - 40,
-                                    justify="center", foreground="#555")
-        self.hint_label.pack(side=tk.BOTTOM, fill="x", padx=16, pady=4)
+        self.hint_label = tk.Label(self.root, text=hint, bg="#263238",
+                                   fg="#cfd8dc", font=("TkDefaultFont", 11),
+                                   justify="center")
+        self.hint_label.pack(side=tk.BOTTOM, fill="x", padx=6, pady=(0, 4))
 
         bars_box = ttk.Frame(self.root)
         bars_box.pack(side=tk.BOTTOM, fill="x", padx=14)
@@ -185,23 +274,27 @@ class TamagotchiApp:
                                 width=0)
 
         cx = cw // 2
-        cy = ground_y - 66 + int(p["bounce"])
-        r = 52
+        cy = ch // 2 + int(p["bounce"])
+        r = max(48, min(120, int((ch - 110) * 0.34)))
+        scale = r / 52.0
         accent, body = p["accent"], p["body"]
 
-        # тело и уши
+        # тело harder и уши
         canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=body,
                            outline=accent, width=3)
-        for dx in (-30, 30):
-            canvas.create_oval(cx + dx - 11, cy - r - 18, cx + dx + 11,
-                               cy - r + 10, fill=accent, outline="")
+        ear_dx = 30 * scale
+        for dx in (-ear_dx, ear_dx):
+            canvas.create_oval(cx + dx - 11 * scale, cy - r - 18 * scale,
+                               cx + dx + 11 * scale, cy - r + 10 * scale,
+                               fill=accent, outline="")
         # глаза
-        eye_y, eye_dx = cy - 12, 19
+        eye_y = cy - 12 * scale
+        eye_dx = 19 * scale
         ink = "#2b2b2b"
         if p["eye"] == "closed":
             for sx in (-1, 1):
-                canvas.create_line(cx + sx * eye_dx - 7, eye_y,
-                                   cx + sx * eye_dx + 7, eye_y,
+                canvas.create_line(cx + sx * eye_dx - 7 * scale, eye_y,
+                                   cx + sx * eye_dx + 7 * scale, eye_y,
                                    fill=ink, width=3)
             canvas.create_text(cx + r - 6, cy - r - 16, text="Z z z",
                                fill="#c7d4e8",
@@ -209,68 +302,79 @@ class TamagotchiApp:
         elif p["eye"] == "happy":
             for sx in (-1, 1):
                 x0 = cx + sx * eye_dx
-                canvas.create_line(x0 - 7, eye_y, x0, eye_y - 8, fill=ink,
-                                   width=3)
-                canvas.create_line(x0, eye_y - 8, x0 + 7, eye_y, fill=ink,
-                                   width=3)
+                canvas.create_line(x0 - 7 * scale, eye_y, x0,
+                                   eye_y - 8 * scale, fill=ink, width=3)
+                canvas.create_line(x0, eye_y - 8 * scale,
+                                   x0 + 7 * scale, eye_y, fill=ink, width=3)
         elif p["eye"] == "sad_eye":
             for sx in (-1, 1):
                 x0 = cx + sx * eye_dx
-                canvas.create_line(x0 - 6, eye_y - 4, x0 + 6, eye_y + 4,
+                canvas.create_line(x0 - 6 * scale, eye_y - 4 * scale,
+                                   x0 + 6 * scale, eye_y + 4 * scale,
                                    fill=ink, width=3)
         elif p["eye"] == "half":
             for sx in (-1, 1):
                 x0 = cx + sx * eye_dx
-                canvas.create_oval(x0 - 6, eye_y - 3, x0 + 6, eye_y + 5,
+                canvas.create_oval(x0 - 6 * scale, eye_y - 3 * scale,
+                                   x0 + 6 * scale, eye_y + 5 * scale,
                                    fill=ink, outline="")
         else:
             for sx in (-1, 1):
                 x0 = cx + sx * eye_dx
-                canvas.create_oval(x0 - 6, eye_y - 6, x0 + 6, eye_y + 6,
+                canvas.create_oval(x0 - 6 * scale, eye_y - 6 * scale,
+                                   x0 + 6 * scale, eye_y + 6 * scale,
                                    fill=ink, outline="")
 
         # рот
-        my = cy + 24
+        my = cy + 24 * scale
+        arc_r = 17 * scale
         if p["mouth"] == "smile":
-            canvas.create_arc(cx - 17, my - 12, cx + 17, my + 12,
-                              start=200, extent=140, style=tk.ARC, outline=ink,
-                              width=3)
+            canvas.create_arc(cx - arc_r, my - 12 * scale, cx + arc_r,
+                              my + 12 * scale, start=200, extent=140,
+                              style=tk.ARC, outline=ink, width=3)
         elif p["mouth"] == "sad":
-            canvas.create_arc(cx - 17, my + 10, cx + 17, my - 8, start=20,
-                              extent=140, style=tk.ARC, outline=ink, width=3)
+            canvas.create_arc(cx - arc_r, my + 10 * scale, cx + arc_r,
+                              my - 8 * scale, start=20, extent=140,
+                              style=tk.ARC, outline=ink, width=3)
         elif p["mouth"] in ("o", "o_big"):
-            delta = 7 if p["mouth"] == "o" else 10
-            canvas.create_oval(cx - delta, my - 6, cx + delta, my + 14,
-                               fill="#7c4a43", outline=ink, width=2)
+            delta = (7 if p["mouth"] == "o" else 10) * scale
+            canvas.create_oval(cx - delta, my - 6 * scale, cx + delta,
+                               my + 14 * scale, fill="#7c4a43", outline=ink,
+                               width=2)
         else:
-            canvas.create_line(cx - 12, my + 4, cx + 12, my + 4, fill=ink,
+            canvas.create_line(cx - 12 * scale, my + 4 * scale,
+                               cx + 12 * scale, my + 4 * scale, fill=ink,
                                width=3)
 
         # щёки
         for sx in (-1, 1):
-            x0 = cx + sx * 34
-            canvas.create_oval(x0 - 6, cy + 8, x0 + 6, cy + 20,
+            x0 = cx + sx * 34 * scale
+            canvas.create_oval(x0 - 6 * scale, cy + 8 * scale,
+                               x0 + 6 * scale, cy + 20 * scale,
                                fill="#f4a3a0", outline="")
 
         # fx-элементы
         if "drops" in p["fx"]:
             for dx, dy in ((-62, -68), (58, -60), (-44, -50)):
-                canvas.create_oval(cx + dx, cy + dy, cx + dx + 9, cy + dy + 9,
-                                   fill="#6b7d3f", outline="")
+                dx, dy = dx * scale, dy * scale
+                canvas.create_oval(cx + dx, cy + dy, cx + dx + 9 * scale,
+                                   cy + dy + 9 * scale, fill="#6b7d3f",
+                                   outline="")
 
         if "rumble" in p["fx"]:
-            canvas.create_text(cx, cy - r - 34, text="урр...", fill="#c77",
-                               font=("TkDefaultFont", 10, "italic"))
+            canvas.create_text(cx, cy - r - 34 * scale, text="урр...",
+                               fill="#c77", font=("TkDefaultFont", 10,
+                                                  "italic"))
         if "yawn" in p["fx"]:
-            canvas.create_text(cx + r + 16, cy + 18, text="зевок!",
-                               fill="#667",
+            canvas.create_text(cx + r + 16 * scale, cy + 18 * scale,
+                               text="зевок!", fill="#667",
                                font=("TkDefaultFont", 10, "italic"))
         if "tear" in p["fx"]:
-            canvas.create_line(cx - eye_dx, eye_y + 8, cx - eye_dx,
-                               eye_y + 20, fill="#5fa8d3", width=4)
+            canvas.create_line(cx - eye_dx, eye_y + 8 * scale, cx - eye_dx,
+                               eye_y + 20 * scale, fill="#5fa8d3", width=4)
         if "zzz" in p["fx"]:
-            canvas.create_text(cx - r - 4, cy - r - 2, text="z",
-                               fill="#9fb4d0",
+            canvas.create_text(cx - r - 4 * scale, cy - r - 2,
+                               text="z", fill="#9fb4d0",
                                font=("TkDefaultFont", 11, "italic"))
 
         canvas.create_text(10, 10, anchor="nw",
@@ -295,9 +399,8 @@ class TamagotchiApp:
                                  else "#a25353")
         self.mood_label.config(
             text=MOOD_LABELS.get(self.pet.mood(), self.pet.mood()))
-        self.buttons[3].config(text=("⏰ Разбудить [3]" if self.pet.sleeping
-                                     else "😴 Спать [3]"))
-        panel = self.buttons[1].master
+        self.buttons[3].set_title(
+            "⏰ Будить 3" if self.pet.sleeping else "😴 Спать 3")
 
     def set_speech(self, text):
         if isinstance(text, str) and text:
@@ -321,6 +424,7 @@ class TamagotchiApp:
                "wake": "wake", "clean": "clean"}
 
     def _act(self, action):
+        self.actions_count += 1
         event = {"feed": self.pet.feed, "play": self.pet.play,
                  "sleep": self.pet.sleep, "wake": self.pet.wake,
                  "clean": self.pet.clean}[action]()
