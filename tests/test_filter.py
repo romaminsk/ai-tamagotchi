@@ -25,7 +25,7 @@ class _FilterHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         body = json.dumps(
-            {"choices": [{"message": {"content": self.server.content}}]}
+            {"message": {"role": "assistant", "content": self.server.content}}
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -55,19 +55,19 @@ class FilterStubTests(unittest.TestCase):
 
     def test_cjk_returns_none(self):
         self.httpd.content = "Привет 主人, я рад!"
-        self.assertIsNone(self._chat())
+        self.assertIsNone(self._chat().text)
 
     def test_latin_over_30pct_returns_none(self):
         self.httpd.content = "Hello my friend, как дела?"  # латиница > 30%
-        self.assertIsNone(self._chat())
+        self.assertIsNone(self._chat().text)
 
     def test_russian_passes(self):
         self.httpd.content = "  «Ням-ням, как вкусно!» "
-        self.assertEqual(self._chat(), "Ням-ням, как вкусно!")
+        self.assertEqual(self._chat().text, "Ням-ням, как вкусно!")
 
     def test_russian_with_digits_punct_passes(self):
         self.httpd.content = "Мне 5 лет, и я счастлив! :)"
-        self.assertEqual(self._chat(), "Мне 5 лет, и я счастлив! :)")
+        self.assertEqual(self._chat().text, "Мне 5 лет, и я счастлив! :)")
 
 
 class FilterUnitTests(unittest.TestCase):

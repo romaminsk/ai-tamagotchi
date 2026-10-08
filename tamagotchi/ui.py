@@ -11,14 +11,27 @@ import tkinter as tk
 from tkinter import ttk
 
 from . import sprite
-from .llm import (LLMClient, LLMWorker, PhraseScheduler, PRIO_ACTION,
-                  PRIO_IDLE, PRIO_MOOD)
+from .llm import (LAST_METRICS, LLMClient, LLMWorker, PhraseScheduler,
+                  PRIO_ACTION, PRIO_IDLE, PRIO_MOOD)
+from .modelsettings import (BASELINE, CTX_ALLOWED, LENGTH_MODES, OPTIMIZED,
+                            TEMP_MAX, TEMP_MIN, TOK_MAX, clamp_params,
+                            load_params, save_params)
 from .pet import TICK_SECONDS, Pet
 
-W, H = 480, 720
-MIN_H = 680
+W, H = 480, 780
+MIN_H = 740
+MAX_H = 780
 CANVAS_H = 380
 BTN_FONT = 14
+BTN_PANEL_FONT = 12
+PANEL_PIC_PX = 4
+TEMP_STEP = 0.1
+TOKEN_STEPS = (60, 120, 220, 320, 400)
+SPEECH_MAX_CHARS = 320
+SPEECH_MAX_LINES = 6
+SPEECH_FONT = 12
+LENGTH_RU = {"short": "кратко", "medium": "средне", "long": "развёрнуто"}
+CTX_RU = {2048: "2048", 4096: "4096", 8192: "8192"}
 BTN_PRESS_MS = 130      # эффект нажатия, мс
 
 MOOD_LABELS = {
@@ -34,6 +47,7 @@ MOOD_LABELS = {
 BTN_BG = "#37474f"
 BTN_FG = "#eceff1"
 BTN_BG_PRESS = "#78909c"
+BTN_DISABLE_BG = "#546e7a"
 BTN_DISABLE_NOTE = ""
 
 
@@ -45,16 +59,18 @@ class BigButton(tk.Label):
     к <Button-1>, с эффектом нажатия и курсором hand2.
     """
 
-    def __init__(self, master, title: str, command):
+    def __init__(self, master, title: str, command,
+                 font_size: int = BTN_FONT, pady: int = 10):
         super().__init__(master, text=title, bg=BTN_BG, fg=BTN_FG,
-                         font=("TkDefaultFont", BTN_FONT, "bold"),
-                         padx=10, pady=10, cursor="hand2",
+                         font=("TkDefaultFont", font_size, "bold"),
+                         padx=10, pady=pady, cursor="hand2",
                          relief="raised", bd=1)
         self._title_base = title
         self._command = command
         self._press_job = None
         self._armed = False           # флаг занятости эффекта, не блокирует
         self._press_flowing = False   # ok для тестов
+        self._enabled = True
         self.bind("<Button-1>", self.on_press)
         self.bind("<ButtonRelease-1>", self.on_release)
         self.bind("<Enter>", lambda e: self._set_hover())
@@ -73,6 +89,8 @@ class BigButton(tk.Label):
             pass
 
     def on_press(self, _event=None):
+        if not self._enabled:
+            return
         if self._press_flowing:
             return  # не дублируем, пока эффект активен
         self._press_flowing = True
@@ -114,6 +132,17 @@ class BigButton(tk.Label):
         self._title_base = title
         self.configure(text=title)
 
+    def set_enabled(self, enabled: bool):
+        """Серый фон и no-op клик, если выключена."""
+        self._enabled = enabled
+        try:
+            self.configure(bg=BTN_DISABLE_BG if not enabled else BTN_BG,
+                           cursor="hand2" if enabled else "arrow")
+        except tk.TclError:
+            pass
+        if enabled and self._title_base:
+            self.configure(text=self._title_base)
+
 
 CHECK_MS = 30_000        # период проверки доступности Ollama, мс
 IDLE_CHECK_MS = 2_000
@@ -145,11 +174,13 @@ class TamagotchiApp:
         self._last_mood = pet.mood()
         self._greet_done = False
         self.actions_count = 0  # для смоук-проверки кликов
+        self.model_cache: list[str] = []   # кэш /api/tags (фон. поток)
+        self._model_index = 0
 
         self.root.title(f"Тамагочи: {config['PET_NAME']}")
         self.root.geometry(f"{W}x{H}")
         self.root.minsize(W, MIN_H)
-        self.root.resizable(True, True)
+        self.root.resizable(True, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build()
@@ -174,8 +205,8 @@ class TamagotchiApp:
         self.status_label = ttk.Label(self.root, text="LLM: офлайн")
         self.status_label.pack(side=tk.TOP, anchor="w", padx=8, pady=4)
 
-        # нижние блоки: сначала кнопки (самый низ), затем подсказка,
-        # полосы, пузырь — Canvas добавляется последним и отделяет место
+        # нижние блоки: сначала кнопки (самый низ), затем панель модели,
+        # подсказка, полосы, пузырь — Canvas добавляется последним
         panel = tk.Frame(self.root, bg="#263238")
         panel.pack(side=tk.BOTTOM, fill="x", padx=6, pady=6)
         self.buttons = {}
@@ -188,6 +219,51 @@ class TamagotchiApp:
             btn = BigButton(panel, title, handler)
             btn.grid(row=0, column=column, sticky="nsew")
             self.buttons[column + 1] = btn
+
+        # ——— панель «Модель» (между кнопками и подсказкой) ———
+        model_panel = tk.LabelFrame(self.root, text="Модель", bg="#263238",
+                                    fg="#cfd8dc")
+        model_panel.pack(side=tk.BOTTOM, fill="x", padx=6, pady=(0, 2))
+        self.model_buttons = {}
+        rows = (
+            [("Temp −", self._temp_down), ("Temp +", self._temp_up),
+             ("Длина ⟳", self._length_cycle)],
+            [("Токены ⟳", self._tokens_cycle),
+             ("Контекст ⟳", self._ctx_cycle),
+             ("Пресет ⟳", self._preset_cycle)],
+            [("Модель ⟳", self._model_cycle)],
+        )
+        for row, items in enumerate(rows):
+            for column, (title, handler) in enumerate(items):
+                if len(items) == 1:
+                    model_panel.columnconfigure(0, weight=1)
+                    model_panel.columnconfigure(1, weight=1)
+                    btn = BigButton(model_panel, title, handler,
+                                    font_size=BTN_PANEL_FONT, pady=4)
+                    btn.grid(row=row, column=0, columnspan=2, sticky="we",
+                             padx=2, pady=2)
+                else:
+                    model_panel.columnconfigure(column, weight=1,
+                                                uniform="mpanel")
+                    btn = BigButton(model_panel, title, handler,
+                                    font_size=BTN_PANEL_FONT, pady=4)
+                    btn.grid(row=row, column=column, sticky="we",
+                             padx=2, pady=2)
+                key = title.split()[0].rstrip("−/+⟳ ") or f"r{row}c{column}"
+                self.model_buttons[key] = btn
+
+        self.params_label = tk.Label(
+            model_panel, text="", bg="#263238", fg="#b0bec5",
+            font=("TkDefaultFont", 10), justify="center")
+        self.params_label.grid(row=len(rows), column=0, columnspan=3,
+                               sticky="we")
+        self.metrics_label = tk.Label(
+            model_panel, text="последний ответ: —", bg="#263238",
+            fg="#b0bec5", font=("TkDefaultFont", 10), justify="center")
+        self.metrics_label.grid(row=len(rows) + 1, column=0, columnspan=3,
+                                sticky="we")
+        self._refresh_params_line()
+        self._update_model_button_state()
 
         hint = ("Нажимай кнопки или клавиши 1-4. Следи за полосами: "
                 "когда они падают, питомцу плохо.")
@@ -211,10 +287,13 @@ class TamagotchiApp:
         self.mood_label = ttk.Label(bars_box, text="Настроение: —")
         self.mood_label.pack(pady=2)
 
-        self.speech = ttk.Label(self.root, text="", wraplength=W - 60,
-                                justify="center", relief="solid",
-                                padding=8, font=("TkDefaultFont", 12))
+        self.speech = tk.Label(self.root, text="", wraplength=W - 60,
+                               justify="center", relief="solid", bd=1,
+                               bg="#37474f", fg="#eceff1",
+                               padx=10, pady=8,
+                               font=("TkDefaultFont", SPEECH_FONT))
         self.speech.pack(side=tk.BOTTOM, fill="x", padx=24, pady=8)
+        self.speech.configure(height=SPEECH_MAX_LINES)  # фикс. высота пузыря
         self.set_speech(f"Привет! Я {self.config['PET_NAME']}.")
 
         # Canvas — последним: растягивается (expand) и отдаёт место
@@ -223,12 +302,12 @@ class TamagotchiApp:
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
     def _fit_window_height(self):
-        """Если контент требует больше места — растягиваем окно по высоте."""
+        """Высота окна не выше MAX_H: лишнее «съедает» Canvas (expand)."""
         self.root.update_idletasks()
         required = self.root.winfo_reqheight()
         current = self.root.winfo_height()
         if required > current:
-            self.root.geometry(f"{W}x{required}")
+            self.root.geometry(f"{W}x{min(required, MAX_H)}")
 
     def _bind_keys(self):
         for key, index in (("1", 1), ("2", 2), ("3", 3), ("4", 4)):
@@ -401,10 +480,20 @@ class TamagotchiApp:
             text=MOOD_LABELS.get(self.pet.mood(), self.pet.mood()))
         self.buttons[3].set_title(
             "⏰ Будить 3" if self.pet.sleeping else "😴 Спать 3")
+        self._refresh_params_line()
+        self._refresh_metrics_line()
 
     def set_speech(self, text):
         if isinstance(text, str) and text:
-            self.speech.config(text=text[:200])
+            width = max(320, min(600, self.root.winfo_width() or W))
+            try:
+                self.speech.configure(wraplength=width - 60)
+            except tk.TclError:
+                pass
+            shown = text[:SPEECH_MAX_CHARS]
+            if len(text) > SPEECH_MAX_CHARS:
+                shown = shown.rstrip() + "…"
+            self.speech.config(text=shown)
 
     # ——— действия игрока (мгновенная заготовка + запрос LLM) ———
 
@@ -445,6 +534,104 @@ class TamagotchiApp:
     def snapshot_params(self):
         return {"hunger": self.pet.hunger, "energy": self.pet.energy,
                 "fun": self.pet.fun, "hygiene": self.pet.hygiene}
+
+    # ——— панель «Модель»: параметры со следующего запроса ———
+
+    def _apply_params(self):
+        """Кламп, сохранение в model-settings.json, обновление строки."""
+        self.client.params = clamp_params(self.client.params)
+        self._refresh_params_line()
+        try:
+            save_params(self.client.params)
+        except OSError:
+            pass
+
+    def _refresh_params_line(self):
+        p = self.client.params
+        txt = (f"temp {p.temperature} · top_p {p.top_p} · "
+               f"токены {p.max_tokens} · ctx {p.num_ctx} · "
+               f"длина: {LENGTH_RU[p.length_mode]} · {p.model}")
+        try:
+            self.params_label.config(text=txt)
+        except tk.TclError:
+            pass
+
+    def _refresh_metrics_line(self):
+        m = LAST_METRICS.get()
+        if m is None:
+            txt = "последний ответ: —"
+        else:
+            secs = (m.total_duration / 1e9) if m.total_duration else None
+            tps = m.tokens_per_sec
+            parts = []
+            if m.eval_count:
+                parts.append(f"{m.eval_count} ток")
+            if tps:
+                parts.append(f"{tps:.1f} ток/с")
+            if secs:
+                parts.append(f"{secs:.1f} с")
+            txt = ("последний ответ: " + (" · ".join(parts) if parts
+                                          else "—"))
+        try:
+            self.metrics_label.config(text=txt)
+        except tk.TclError:
+            pass
+
+    def _temp_up(self):
+        self.client.params.temperature = min(
+            TEMP_MAX, round(self.client.params.temperature + TEMP_STEP, 1))
+        self._apply_params()
+
+    def _temp_down(self):
+        self.client.params.temperature = max(
+            TEMP_MIN, round(self.client.params.temperature - TEMP_STEP, 1))
+        self._apply_params()
+
+    def _length_cycle(self):
+        modes = LENGTH_MODES
+        i = modes.index(self.client.params.length_mode)
+        self.client.params.length_mode = modes[(i + 1) % len(modes)]
+        self._apply_params()
+
+    def _tokens_cycle(self):
+        steps = TOKEN_STEPS
+        i = (steps.index(self.client.params.max_tokens) + 1) % len(steps) \
+            if self.client.params.max_tokens in steps else 0
+        self.client.params.max_tokens = steps[i]
+        self._apply_params()
+
+    def _ctx_cycle(self):
+        i = (CTX_ALLOWED.index(self.client.params.num_ctx) + 1) \
+            % len(CTX_ALLOWED)
+        self.client.params.num_ctx = CTX_ALLOWED[i]
+        self._apply_params()
+
+    def _preset_cycle(self):
+        p = self.client.params
+        if p.prompt_variant == "baseline":
+            import dataclasses
+            self.client.params = dataclasses.replace(OPTIMIZED)
+        else:
+            import dataclasses
+            self.client.params = dataclasses.replace(BASELINE)
+        self._apply_params()
+
+    def _model_cycle(self):
+        """Цикл по моделям из кэша /api/tags (без сетевых вызовов)."""
+        names = [n for n in self.model_cache if n]
+        if len(names) < 2:
+            return
+        i = (self._model_index + 1) % len(names) if names else 0
+        self._model_index = i
+        self.client.params.model = names[i]
+        self._apply_params()
+
+    def _update_model_button_state(self):
+        btn = self.model_buttons.get("Модель")
+        if btn is None:
+            return
+        enabled = len([n for n in self.model_cache if n]) >= 2
+        btn.set_enabled(enabled)
 
     # ——— фоновые циклы (root.after), UI не блокируется ———
 
@@ -496,8 +683,9 @@ class TamagotchiApp:
     def _trigger_availability_check(self):
         def run():
             online = self.client.check_available()
+            models = self.client.list_models() or []
             try:
-                self.availability.put(online)
+                self.availability.put((online, models))
             except Exception:
                 pass
 
@@ -505,10 +693,14 @@ class TamagotchiApp:
 
     def _check_loop(self):
         try:
-            while True:
-                ok = self.availability.get_nowait()
-                if ok != self.online:
-                    self.online = ok
+            online, models = self.availability.get_nowait()
+            if online != self.online:
+                self.online = online
+            if models:
+                self.model_cache = models
+                if self.client.params.model not in models:
+                    self._model_index = 0
+                self._update_model_button_state()
         except queue.Empty:
             pass
         self.root.after(CHECK_MS, self._trigger_availability_check)

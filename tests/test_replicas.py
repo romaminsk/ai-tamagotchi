@@ -50,8 +50,8 @@ class _RepeatHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         self.rfile.read(length)
         body = json.dumps({
-            "choices": [{"message": {"content":
-                                     "Однообразная реплика детектор."}}]
+            "message": {"role": "assistant",
+                        "content": "Однообразная реплика детектор."}
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -111,9 +111,9 @@ class AntiRepeatStubTests(unittest.TestCase):
 
     def test_repeat_reply_rejected(self):
         client = LLMClient(f"http://127.0.0.1:{self.port}", "qwen2.5:3b", 5.0)
-        first = client.chat("Пушок", "neutral", {"hunger": 50}, "idle")
+        first = client.chat("Пушок", "neutral", {"hunger": 50}, "idle").text
         self.assertEqual(first, "Однообразная реплика детектор.")
-        second = client.chat("Пушок", "neutral", {"hunger": 50}, "idle")
+        second = client.chat("Пушок", "neutral", {"hunger": 50}, "idle").text
         self.assertIsNone(second)
 
     def test_recent_window_trims(self):
