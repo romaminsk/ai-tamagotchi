@@ -196,8 +196,13 @@ def run_smoke(config) -> int:
             pass
 
     def check_buttons_layout() -> int:
-        """Кнопки маппятся и целиком внутри окна (действия + панель)."""
+        """Кнопки маппятся, целиком внутри окна; Canvas питомца ≥ 240 px."""
         root.update_idletasks()
+        canvas_h = app.canvas.winfo_height()
+        if canvas_h < 240:
+            print(f"[SMOKE FAIL] canvas питомца {canvas_h}px < 240px "
+                  "(вытесняется нижними панелями)")
+            return 1
         win_top = root.winfo_rooty()
         win_bottom = win_top + root.winfo_height()
         win_right = root.winfo_rootx() + root.winfo_width()
@@ -226,7 +231,8 @@ def run_smoke(config) -> int:
             for problem in problems:
                 print("  -", problem)
             return 1
-        print("[SMOKE OK] все кнопки отображены и внутри окна")
+        print("[SMOKE OK] все кнопки отображены и внутри окна,"
+              f" Canvas питомца {canvas_h}px")
         return 0
 
     def check_button_clicks() -> int:

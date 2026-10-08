@@ -21,7 +21,7 @@ from .pet import TICK_SECONDS, Pet
 W, H = 480, 780
 MIN_H = 740
 MAX_H = 780
-CANVAS_H = 380
+CANVAS_H = 260
 BTN_FONT = 14
 BTN_PANEL_FONT = 12
 PANEL_PIC_PX = 4
@@ -202,6 +202,12 @@ class TamagotchiApp:
     # ——— построение окна ———
 
     def _build(self):
+        # Canvas упаковывается раньше нижних блоков: гарантия места
+        # (панель «Модель» не должна его сжимать)
+        self.canvas = tk.Canvas(self.root, width=W, height=CANVAS_H,
+                                name="scene", highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
         self.status_label = ttk.Label(self.root, text="LLM: офлайн")
         self.status_label.pack(side=tk.TOP, anchor="w", padx=8, pady=4)
 
@@ -295,11 +301,6 @@ class TamagotchiApp:
         self.speech.pack(side=tk.BOTTOM, fill="x", padx=24, pady=8)
         self.speech.configure(height=SPEECH_MAX_LINES)  # фикс. высота пузыря
         self.set_speech(f"Привет! Я {self.config['PET_NAME']}.")
-
-        # Canvas — последним: растягивается (expand) и отдаёт место
-        self.canvas = tk.Canvas(self.root, width=W, height=CANVAS_H,
-                                name="scene", highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
 
     def _fit_window_height(self):
         """Высота окна не выше MAX_H: лишнее «съедает» Canvas (expand)."""
