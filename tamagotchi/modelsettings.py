@@ -72,21 +72,19 @@ BASELINE = ModelParams(
     prompt_variant="baseline",
 )
 
-# Пресет optimized: базовые значения до этапа 4; финал определяется
-# бенчмарком и записывается сюда.
-# Итог перемера (docs/optimization-report.md, правило v2: принято>=90%,
-# среднее время <=15 с, максимум символов/с, при равенстве в 10% — длиннее):
-# выбрана конфигурация B = baseline-параметры + optimized-промпт long
-# (25.30 с у C — выше лимита 15 с; у B 13.7 симв./с против 13.4 у M-medium,
-# и B длиннее). Значения пресета:
+# Пресет optimized: итог перемера (docs/optimization-report.md):
+# правило v3 (принято >= 90%, время <= 15 с, максимум символов/с; при
+# равенстве в 10% — более быстрая) выбрало M-medium: 13.4 симв/с против
+# 13.7 у B (в пределах 10%), тай-брейк по скорости (6.70 с против
+# 11.31 с). Значения пресета:
 OPTIMIZED = ModelParams(
-    temperature=1.0,          # как в B (baseline-параметры)
+    temperature=1.0,          # как в M-medium (baseline-параметры)
     top_p=0.95,
     top_k=40,
     repeat_penalty=1.1,
-    max_tokens=60,
+    max_tokens=160,
     num_ctx=4096,
-    length_mode="long",       # объёмный промпт, обрезка лимитом токенов
+    length_mode="medium",     # 2–3 предложения до 240 символов
     model="qwen2.5:3b",
     prompt_variant="optimized",
 )

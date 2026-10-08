@@ -50,12 +50,12 @@ class ChooseOptimizedTests(unittest.TestCase):
         self.assertEqual(name, "B")
         self.assertIn("chars/sec", why)
 
-    def test_two_passing_close_chars_per_sec_picks_longer(self):
+    def test_two_passing_close_chars_per_sec_picks_faster(self):
         cand = {"B": self._c(0.95, 10.0, 200),    # 20 симв./с
-                "C": self._c(0.95, 15.0, 300)}    # 20 симв./с, но длиннее
+                "C": self._c(0.95, 9.5, 190)}     # 20 симв./с, но быстрее
         name, why = choose_optimized(cand)
         self.assertEqual(name, "C")
-        self.assertIn("длинный", why)
+        self.assertIn("скорости", why)
 
     def test_none_passes_threshold_stays(self):
         cand = {"B": self._c(0.8, 2.0, 20),       # доля < 90%
