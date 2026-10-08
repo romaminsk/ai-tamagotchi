@@ -61,10 +61,10 @@ TIE_WINDOW = 0.10
 
 
 def choose_optimized(candidates: dict[str, dict]) -> tuple[str | None, str]:
-    """Правило v2: среди кандидатов с accepted_share >= 90% и
+    """Правило v3: среди кандидатов с accepted_share >= 90% и
     avg_time <= 15 с выбрать максимум chars/sec (симв./с =
     длина принятых / время); при равенстве в пределах 10% —
-    более длинную. Возвращает (имя, объяснение).
+    более быстрая. Возвращает (имя, объяснение).
     """
     passed = []
     for name, s in sorted(candidates.items()):
@@ -83,9 +83,10 @@ def choose_optimized(candidates: dict[str, dict]) -> tuple[str | None, str]:
         return close[0], (f"пороги прошли: {','.join(passed)};"
                           f" лучший chars/sec у {close[0]} "
                           f"({cps[close[0]]:.1f} симв./с)")
-    top = max(close, key=lambda n: candidates[n]["avg_len"] or 0.0)
-    return top, (f"пороги прошли: {','.join(passed)}; chars/sec в пределах"
-                 f" {TIE_WINDOW:.0%}; взят более длинный: {top}")
+    fastest = min(close, key=lambda n: candidates[n]["avg_time"])
+    return fastest, (f"пороги прошли: {','.join(passed)}; chars/sec"
+                     f" в пределах {TIE_WINDOW:.0%}; тай-брейк по скорости:"
+                     f" {fastest} ({candidates[fastest]['avg_time']:.2f} с)")
 
 
 # ——— раннер бенчмарка (вызывается через python -m tamagotchi --bench) ———
@@ -494,18 +495,21 @@ def write_report(raw: dict, path: str = "docs/optimization-report.md",
     ap("- Прогрев: 1 запрос на конфигурацию (не в статистике)."
        " Холодный старт: один раз `ollama stop` и первый запрос"
        " (load_duration отдельно).")
+    order_txt = ""
+    if raw.get("config_order_full_shuffle"):
+        order_txt = (f"полный shuffle: "
+                     f"{', '.join(raw['config_order_full_shuffle'])}; ")
+    order_txt += (f"фактический порядок запуска: "
+                  f"{', '.join(raw.get('config_order', []))}")
     ap(f"- Прогонов: {raw.get('runs_summary', 'см. raw')};"
        f" порядок конфигураций перемешан и зафиксирован"
-       f" `random.Random(42)` (полный shuffle: "
-       f"{', '.join(raw.get('config_order_full_shuffle', []))};"
-       f" фактический порядок запуска: "
-       f"{', '.join(raw.get('config_order', []))}).")
+       f" `random.Random(42)` ({order_txt}).")
     ap("- Автометрики качества — прокси: не заменяют человеческую оценку.")
     ap(raw.get("single_run_note",
                "Все замеры — один запуск бенчмарка (один прогон целиком),"
                " если не помечено иное (`source_run`)."))
     ap("")
-    ap ("## Таблица «до/после» (A–E)")
+    ap ("## Таблица «до/после»")
     ap("")
     ap("| Конфиг | Среднее,с | p95,с | ток/с | Символ. | с/100 симв. |"
        " симв./с | Принято | Откл. | Model | SIZE | PROCESSOR |"
@@ -518,7 +522,7 @@ def write_report(raw: dict, path: str = "docs/optimization-report.md",
                " | | | | |")
             continue
         if cfg.get("skipped"):
-            ap(f"| {name} | замеры не уложившиеся: {cfg['skipped']} |"
+            ap(f"| {name} | не уложилась: {cfg['skipped']} |"
                " | | | | | | | | | |")
             continue
         s = cfg.get("summary") or {}
@@ -546,9 +550,10 @@ def write_report(raw: dict, path: str = "docs/optimization-report.md",
     ap("")
     cs = raw.get("cold_start") or {}
     cq = cs.get("query") or {}
-    ap(f"Холодный старт (`{cs.get('model')}`): load_duration = "
-       f"{(cq.get('load_duration') or 0)/1e9:.1f} с, полный запрос = "
-       f"{cq.get('time')} с (в статистику не входит).")
+    ap(f"Холодный старт (`{cs.get('model')}`, приблизительно: один замер):"
+       f" load_duration = {(cq.get('load_duration') or 0)/1e9:.1f} с,"
+       f" полный запрос = {(cq.get('time') or 0):.1f} с"
+       f" (в статистику не входит).")
     ap("")
     ap("Качество ответов: см. файл `docs/bench-raw.json` (полные реплики).")
     ap("")
@@ -585,6 +590,10 @@ def write_report(raw: dict, path: str = "docs/optimization-report.md",
     if chosen:
         ap("Записанный пресет OPTIMIZED (modelsettings.py): "
            + ", ".join(f"{k}={v}" for k, v in chosen.items()))
+    ap("")
+    ap("Режим long доступен кнопкой «Длина ⟳» в панели «Модель»;"
+       " при лимите 60 токенов длинная реплика обрезается по лимиту"
+       " (конфигурация B: в среднем 155 символов при 60 ток).")
     ap("")
     ap("## Ограничения")
     ap("")
