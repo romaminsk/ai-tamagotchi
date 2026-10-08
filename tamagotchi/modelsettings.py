@@ -74,15 +74,21 @@ BASELINE = ModelParams(
 
 # Пресет optimized: базовые значения до этапа 4; финал определяется
 # бенчмарком и записывается сюда.
-# Итог бенчмарка (docs/optimization-report.md, rule "accepted>=90% и
-# время<=2.5x A"): порог не выполнен (быстрее всех A, но short; B/C/E
-# не проходят по времени), поэтому OPTIMIZED остаётся значениями этапа 1:
-# temp 0.8, top_p 0.9, top_k 40, repeat_penalty 1.15, max_tokens 220,
-# num_ctx 4096, length long, промпт optimized.
+# Итог перемера (docs/optimization-report.md, правило v2: принято>=90%,
+# среднее время <=15 с, максимум символов/с, при равенстве в 10% — длиннее):
+# выбрана конфигурация B = baseline-параметры + optimized-промпт long
+# (25.30 с у C — выше лимита 15 с; у B 13.7 симв./с против 13.4 у M-medium,
+# и B длиннее). Значения пресета:
 OPTIMIZED = ModelParams(
-    temperature=0.8, top_p=0.9, top_k=40, repeat_penalty=1.15,
-    max_tokens=220, num_ctx=4096, length_mode="long",
-    model="qwen2.5:3b", prompt_variant="optimized",
+    temperature=1.0,          # как в B (baseline-параметры)
+    top_p=0.95,
+    top_k=40,
+    repeat_penalty=1.1,
+    max_tokens=60,
+    num_ctx=4096,
+    length_mode="long",       # объёмный промпт, обрезка лимитом токенов
+    model="qwen2.5:3b",
+    prompt_variant="optimized",
 )
 
 

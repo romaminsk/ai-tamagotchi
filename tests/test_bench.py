@@ -43,25 +43,25 @@ class ChooseOptimizedTests(unittest.TestCase):
         return {"accepted_share": share, "avg_time": t, "avg_len": ln}
 
     def test_single_passing_candidate(self):
-        a = self._c(1.0, 2.0, 40)
         cand = {"B": self._c(0.95, 4.0, 60),
-                "C": self._c(0.5, 4.0, 300)}
-        name, _ = choose_optimized(a, cand)
+                "C": self._c(0.5, 4.0, 300),      # мало принятых
+                "E": self._c(1.0, 20.0, 400)}     # время > 15 с
+        name, why = choose_optimized(cand)
         self.assertEqual(name, "B")
+        self.assertIn("chars/sec", why)
 
-    def test_two_passing_equal_length_picks_faster(self):
-        a = self._c(1.0, 2.0, 40)
-        cand = {"B": self._c(0.95, 4.0, 200),
-                "C": self._c(0.95, 3.0, 195)}
-        name, why = choose_optimized(a, cand)
+    def test_two_passing_close_chars_per_sec_picks_longer(self):
+        cand = {"B": self._c(0.95, 10.0, 200),    # 20 симв./с
+                "C": self._c(0.95, 15.0, 300)}    # 20 симв./с, но длиннее
+        name, why = choose_optimized(cand)
         self.assertEqual(name, "C")
-        self.assertIn("быстрый", why)
+        self.assertIn("длинный", why)
 
-    def test_none_passes_higher_threshold_stays(self):
-        a = self._c(1.0, 2.0, 40)
-        cand = {"B": self._c(0.85, 4.0, 300),
-                "C": self._c(0.95, 6.0, 300)}  # время > 2.5x A
-        name, why = choose_optimized(a, cand)
+    def test_none_passes_threshold_stays(self):
+        cand = {"B": self._c(0.8, 2.0, 20),       # доля < 90%
+                "C": self._c(0.85, 5.0, 500),     # доля < 90%
+                "E": self._c(1.0, 30.0, 500)}     # время > 15 с
+        name, why = choose_optimized(cand)
         self.assertIsNone(name)
         self.assertIn("порог", why)
 

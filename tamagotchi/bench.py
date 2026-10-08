@@ -53,45 +53,39 @@ def parse_ps_line(line: str) -> int | None:
         return None
 
 
-# ——— правило выбора OPTIMIZED ———
+# ——— правило выбора OPTIMIZED (v2) ———
 
 ACCEPT_MIN = 0.90
-TIME_FACTOR = 2.5
+TIME_LIMIT_S = 15.0           # абсолютный лимит среднего времени
 TIE_WINDOW = 0.10
 
 
-def choose_optimized(a_stats: dict, candidates: dict[str, dict]
-                     ) -> tuple[str | None, str]:
-    """Правило: среди B/C/D/E с accepted >= 90% и avg_time <= 2.5x A
-    выбрать больше «средняя длина принятых реплик»; при равенстве
-    (в пределах 10%) — быстрее. Возвращает (имя, объяснение).
-
-    Статистика конфигурации:
-      accepted_share (0..1), avg_time (сек), avg_len (символы принятых).
+def choose_optimized(candidates: dict[str, dict]) -> tuple[str | None, str]:
+    """Правило v2: среди кандидатов с accepted_share >= 90% и
+    avg_time <= 15 с выбрать максимум chars/sec (симв./с =
+    длина принятых / время); при равенстве в пределах 10% —
+    более длинную. Возвращает (имя, объяснение).
     """
-    if not a_stats.get("avg_time"):
-        return None, "нет baseline-времени (A), правило не применено"
-    limit = a_stats["avg_time"] * TIME_FACTOR
     passed = []
     for name, s in sorted(candidates.items()):
         if (s.get("accepted_share", 0.0) >= ACCEPT_MIN
                 and s.get("avg_time") is not None
-                and s["avg_time"] <= limit):
+                and s["avg_time"] <= TIME_LIMIT_S):
             passed.append(name)
     if not passed:
-        return None, ("ни одна из B/C/D/E не проходит (accepted>=90%, "
-                      f"время<={TIME_FACTOR}x A) — порог не выполнен")
-    best_len = max(candidates[n]["avg_len"] or 0.0 for n in passed)
-    close = [n for n in passed
-             if candidates[n]["avg_len"]
-             >= best_len * (1 - TIE_WINDOW)]
+        return None, (f"ни одна не проходит (accepted>={ACCEPT_MIN:.0%},"
+                      f" время<={TIME_LIMIT_S} с) — порог не выполнен")
+    cps = {n: (candidates[n]["avg_len"] or 0.0) / candidates[n]["avg_time"]
+           for n in passed}
+    best_cps = max(cps.values())
+    close = [n for n in passed if cps[n] >= best_cps * (1 - TIE_WINDOW)]
     if len(close) == 1:
-        return close[0], ("пороги прошли " + ",".join(passed)
-                          + "; самая длинная реплика у %s" % close[0])
-    fastest = min(close, key=lambda n: candidates[n]["avg_time"])
-    return fastest, ("несколько прошли по порогам; длины в пределах 10%%; "
-                     "взят самый быстрый из близких по длине: %s"
-                     % fastest)
+        return close[0], (f"пороги прошли: {','.join(passed)};"
+                          f" лучший chars/sec у {close[0]} "
+                          f"({cps[close[0]]:.1f} симв./с)")
+    top = max(close, key=lambda n: candidates[n]["avg_len"] or 0.0)
+    return top, (f"пороги прошли: {','.join(passed)}; chars/sec в пределах"
+                 f" {TIE_WINDOW:.0%}; взят более длинный: {top}")
 
 
 # ——— раннер бенчмарка (вызывается через python -m tamagotchi --bench) ———
@@ -104,7 +98,7 @@ import subprocess as _subprocess
 import threading as _threading
 import time as _time
 
-TOTAL_DEADLINE_S = 900.0        # 15 минут на весь бенчмарк
+TOTAL_DEADLINE_S = 2400.0       # 40 минут на весь бенчмарк
 PULL_TIMEOUT_CAP_S = 600.0      # таймаут ollama pull, сек
 PULL_RESULT_BUFFER_S = 240.0    # запас времени после pull на прогоны
 RSS_SAMPLE_S = 0.5
@@ -137,10 +131,9 @@ def build_configs() -> dict:
         "A": a,
         "B": b,
         "C": c,
+        "M-medium": _dc.replace(c, length_mode="medium", max_tokens=160),
         "D-q8_0": _dc.replace(c, model="qwen2.5:3b-instruct-q8_0"),
-        "D-q2_K": _dc.replace(c, model="qwen2.5:3b-instruct-q2_K"),
         "E-2048": _dc.replace(c, num_ctx=2048),
-        "E-4096": c,   # идентична C — данные переиспользуются
         "E-8192": _dc.replace(c, num_ctx=8192),
     }
 
@@ -283,49 +276,6 @@ def warmup_query(client) -> dict:
             "total_duration": reply.metrics.total_duration}
 
 
-def collect_config(client: object, runs: int) -> dict:
-    """1 прогрев + runs×6 сценариев; возвращает сырые данные конфигурации."""
-    perf_counter = _time.perf_counter
-    warm = warmup_query(client)
-    samples = []
-    for run_index in range(runs):
-        for scenario_id, event in SCENARIOS:
-            mood, params = _pet_mood(scenario_id)
-            started = perf_counter()
-            reply = client.chat("Пушок", mood, params, event)
-            elapsed = perf_counter() - started
-            sample = {
-                "run": run_index,
-                "scenario": scenario_id,
-                "event": event,
-                "time": round(elapsed, 3),
-                "text": reply.text,
-                "rejected_reason": reply.rejected_reason,
-                "eval_count": reply.metrics.eval_count,
-                "eval_duration": reply.metrics.eval_duration,
-                "prompt_eval_count": reply.metrics.prompt_eval_count,
-                "prompt_eval_duration": reply.metrics.prompt_eval_duration,
-                "load_duration": reply.metrics.load_duration,
-                "total_duration": reply.metrics.total_duration,
-            }
-            samples.append(sample)
-    return {"warm": warm, "samples": samples}
-
-
-def _is_cold_warmup(client, name: str) -> dict:
-    """Один прогрев-запрос конфигурации (не в статистике)"""
-    mood, params = _pet_mood("fed")
-    started = _time.perf_counter()
-    reply = client.chat("Пушок", mood, params, "fed")
-    return {"time": round(_time.perf_counter() - started, 3),
-            "text": reply.text,
-            "rejected_reason": reply.rejected_reason,
-            "load_duration": reply.metrics.load_duration,
-            "eval_count": reply.metrics.eval_count,
-            "eval_duration": reply.metrics.eval_duration,
-            "total_duration": reply.metrics.total_duration}
-
-
 def summarize(samples: list[dict]) -> dict:
     """Статистика конфигурации из сырых сэмплов."""
     accepted = [s for s in samples if s["rejected_reason"] is None]
@@ -362,9 +312,13 @@ def summarize(samples: list[dict]) -> dict:
     }
 
 
-def run_bench(ollama_url: str, timeout_per_query: float = 120.0
-              ) -> dict:
-    """Полный бенчмарк: конфигурации A-E, raw + сводка, без записи файлов."""
+def run_bench(ollama_url: str, timeout_per_query: float = 120.0) -> dict:
+    """Перемер: A, B, C, M-medium, E-2048, E-8192, D-q8_0.
+
+    Пуллы — отдельная фаза до замеров; перед стартом все модели остановлены
+    (чистые условия); порядок перемешан Random(42) целиком; 2 прогона
+    на сценарий; первый warmup конфигурации заходит холодным стартом.
+    """
     import random
     from .llm import LLMClient
     started = _time.perf_counter()
@@ -372,124 +326,115 @@ def run_bench(ollama_url: str, timeout_per_query: float = 120.0
     names = sorted(configs)
     rng = random.Random(42)
     rng.shuffle(names)
-    raw_order_full = list(names)
-    # отклонение от промта (зафиксировано): A и B идут первыми — они
-    # дёшевы и дают базу правилу; пуллы D — в конце (съедают бюджет).
-    # Воспроизводимость сохраняется: оба порядка в raw.
-    others = [n for n in names if n not in ("A", "B")]
-    rng.shuffle(others)
-    names = ["A", "B"] + others
-    print("Порядок конфигураций (Random(42)):", names)
     raw: dict = {
         "date": _time.strftime("%Y-%m-%dT%H:%M:%S"),
         "ollama_version": ollama_version(),
-        "runs_note": "прогонов: adaptive 3->2 по бюджету; per-config в notes",
         "config_order": list(names),
-        "config_order_full_shuffle": raw_order_full,
-        "est_per_query_s": {"A": 3.0, "B": 8.0, "C": 27.0, "E-2048": 27.0,
-                            "E-4096": 27.0, "E-8192": 30.0,
-                            "D-q2_K": 12.0, "D-q8_0": 30.0},
+        "runs": 2,
+        "scenarios_per_run": len(SCENARIOS),
+        "est_per_query_s": {"A": 3.0, "B": 8.0, "C": 27.0,
+                            "M-medium": 20.0, "E-2048": 25.0,
+                            "E-8192": 30.0, "D-q8_0": 30.0},
         "est_note": "оценки для планирования бюджета (по замерам прежних"
                     " прогонов), не входят в результаты",
+        "total_deadline_s": TOTAL_DEADLINE_S,
         "configs": {},
         "cold_start": None,
-        "choose_optimized": None,
         "notes": [],
     }
+    print("Порядок конфигураций (Random(42)):", names)
+    # чистые условия: остановить все загруженные модели
+    stopped = []
+    out = run_cmd(["ollama", "ps"])
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if parts:
+            stopped.append(parts[0])
+    for model in stopped:
+        raw["notes"].append(f"ollama stop {model} перед стартом")
+        stop_model(model)
     sampler = RssSampler()
     sampler.start()
-    runs = 3
+    runs = 2
     cold_done = False
     for name in list(names):
         remaining = TOTAL_DEADLINE_S - (_time.perf_counter() - started)
         cfg = configs[name]
-        if name == "E-4096":
-            raw["notes"].append("E-4096 идентична C — сырые данные C")
-            raw["configs"]["E-4096"] = {"reused": "C"}
-            continue
         raw["configs"].setdefault(name, {})
         raw["configs"][name]["params"] = _dc.asdict(cfg)
         raw["configs"][name]["model_file_size"] = ollama_list_size(cfg.model)
-        # pull для D (пропускаем, если тег уже скачан)
-        if name.startswith("D-") and ollama_list_size(cfg.model) is None:
-            pull_budget = min(PULL_TIMEOUT_CAP_S,
-                              remaining - PULL_RESULT_BUFFER_S)
-            print(f"[bench] pull {cfg.model} (бюджет {pull_budget:.0f} с)")
-            result = pull_model(cfg.model, pull_budget)
-            raw["configs"][name]["pull"] = result
-            if not result["ok"]:
-                raw["configs"][name]["skipped"] = (
-                    "недоступно: " + result["reason"])
-                raw["configs"][name]["samples"] = []
-                continue
-        # холодный старт: один раз в самом начале, stop + первый запрос
-        if not cold_done:
-            raw["cold_start"] = {
-                "model": cfg.model,
-                "stop_output": stop_model(cfg.model),
-            }
-            cold_client = LLMClient(ollama_url, cfg.model,
-                                    timeout_per_query, params=cfg)
-            cold = _is_cold_warmup(cold_client, name)
-            raw["cold_start"]["query"] = cold
-            cold_done = True
-            print(f"[bench] холодный старт {name}: load="
-                  f"{(cold['load_duration'] or 0)/1e9:.1f}с "
-                  f"total={cold['time']:.1f}с")
-        client = LLMClient(ollama_url, cfg.model, timeout_per_query,
-                           params=_dc.replace(cfg))
-        est = raw["est_per_query_s"].get(name, 16.0)
-        runs_i = runs if name in ("A", "B") else min(runs, 2)
-        if runs_i < runs:
-            raw["notes"].append(
-                f"{name}: 2 прогона вместо 3 (полный сет конфигураций"
-                " не укладывается в дедлайн; escape по промту)")
-        while (TOTAL_DEADLINE_S - (_time.perf_counter() - started)
-               < runs_i * 6 * est + 120) and runs_i > 2:
-            runs_i = 2
-            raw["notes"].append(
-                f"{name}: снижено до 2 прогонов (бюджет времени)")
+        est = raw["est_per_query_s"].get(name, 20.0)
         if TOTAL_DEADLINE_S - (_time.perf_counter() - started) \
-                < runs_i * 6 * est + 80:
+                < runs * len(SCENARIOS) * est + 90:
             raw["configs"][name]["skipped"] = (
-                "не уложился по времени (threshold)")
+                "не уложилась: "
+                f"осталось {remaining:.0f} с, планировалось "
+                f"{runs * len(SCENARIOS) * est:.0f} с (лимит 40 мин)")
             raw["configs"][name]["samples"] = []
             continue
-        print(f"[bench] конфигурация {name}({cfg.model}, runs={runs_i}) "
-              f"осталось {remaining:.0f} с")
-        data = collect_config(client, runs_i)
+        print(f"[bench] конфигурация {name} ({cfg.model}, runs={runs}),"
+              f" осталось {remaining:.0f} с")
+        client = LLMClient(ollama_url, cfg.model, timeout_per_query,
+                           params=_dc.replace(cfg))
+        warm = warmup_query(client)
+        if not cold_done:
+            cold_done = True
+            raw["cold_start"] = {"config": name, "model": cfg.model,
+                                 "query": warm}
+            print(f"[bench] холодный старт {name}: load="
+                  f"{(warm['load_duration'] or 0) / 1e9:.1f}с"
+                  f", total={warm['time']:.1f}с")
+        data = {"samples": [], "warm": warm}
+        perf_counter = _time.perf_counter
+        for run_index in range(runs):
+            for scenario_id, event in SCENARIOS:
+                mood, params = _pet_mood(scenario_id)
+                s0 = perf_counter()
+                reply = client.chat("Пушок", mood, params, event)
+                elapsed = perf_counter() - s0
+                data["samples"].append({
+                    "run": run_index, "scenario": scenario_id,
+                    "event": event, "time": round(elapsed, 3),
+                    "text": reply.text,
+                    "rejected_reason": reply.rejected_reason,
+                    "eval_count": reply.metrics.eval_count,
+                    "eval_duration": reply.metrics.eval_duration,
+                    "prompt_eval_count": reply.metrics.prompt_eval_count,
+                    "prompt_eval_duration": reply.metrics
+                    .prompt_eval_duration,
+                    "load_duration": reply.metrics.load_duration,
+                    "total_duration": reply.metrics.total_duration,
+                })
         raw["configs"][name]["samples"] = data["samples"]
         raw["configs"][name]["summary"] = summarize(data["samples"])
         raw["configs"][name]["ollama_ps"] = ollama_ps(cfg.model)
         raw["configs"][name]["max_rss_kb"] = sampler.take()
     elapsed = _time.perf_counter() - started
-    print(f"[bench] запросы завершены за {elapsed:.0f} с")
     sampler.stop()
     raw["bench_elapsed_s"] = round(elapsed, 1)
     raw["max_rss_kb"] = sampler.max_rss_kb
-    raw["rss_samples"] = sampler.samples
+    print(f"[bench] замеры завершены за {elapsed:.0f} с")
     return raw
 
 
 def apply_rule(raw: dict) -> tuple[str | None, str]:
-    """Применяет правило выбора OPTIMIZED к сырым данным бенчмарка."""
-    a = (raw.get("configs", {}).get("A", {}) or {}).get("summary")
-    if not a:
-        return None, "нет статистики A — правило не применено"
+    """Применяет правило v2 к сырым данным бенчмарка."""
     candidates = {}
-    for name in ("B", "C", "D-q8_0", "D-q2_K", "E-2048", "E-4096", "E-8192"):
-        cfg = raw.get("configs", {}).get(name, {})
+    for name, cfg in sorted((raw.get("configs", {}) or {}).items()):
         if cfg.get("skipped"):
             continue
+        if cfg.get("rule_candidate") is False:
+            continue  # стравнение-база (A) не кандидат
         if cfg.get("reused"):
             src = (raw.get("configs", {}).get(cfg["reused"], {}) or {}) \
                 .get("summary")
             if src:
                 candidates[name] = src
             continue
-        if cfg.get("summary"):
+        if cfg.get("summary") and cfg.get("summary").get("accepted_share") \
+                is not None:
             candidates[name] = cfg["summary"]
-    return choose_optimized(a, candidates)
+    return choose_optimized(candidates)
 
 
 def _fmt(v, digits=2, suffix="", dash="—"):
@@ -556,20 +501,25 @@ def write_report(raw: dict, path: str = "docs/optimization-report.md",
        f" фактический порядок запуска: "
        f"{', '.join(raw.get('config_order', []))}).")
     ap("- Автометрики качества — прокси: не заменяют человеческую оценку.")
+    ap(raw.get("single_run_note",
+               "Все замеры — один запуск бенчмарка (один прогон целиком),"
+               " если не помечено иное (`source_run`)."))
     ap("")
     ap ("## Таблица «до/после» (A–E)")
     ap("")
-    ap("| Конфиг | Среднее,с | p95,с | т/с | Символ. | Принято | Откл. |"
-       " Model | SIZE | PROCESSOR | maxRSS,МБ |")
-    ap("|---|---|---|---|---|---|---|---|---|---|---|")
+    ap("| Конфиг | Среднее,с | p95,с | ток/с | Символ. | с/100 симв. |"
+       " симв./с | Принято | Откл. | Model | SIZE | PROCESSOR |"
+       " maxRSS,МБ |")
+    ap("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for name in sorted(raw.get("configs", {})):
         cfg = raw.get("configs", {}).get(name, {})
         if cfg.get("reused"):
-            ap(f"| {name} | переиспользует {cfg['reused']} | | | | |"
+            ap(f"| {name} | переиспользует {cfg['reused']} | | | | | | |"
                " | | | | |")
             continue
         if cfg.get("skipped"):
-            ap(f"| {name} | {cfg['skipped']} | | | | | | | | | |")
+            ap(f"| {name} | замеры не уложившиеся: {cfg['skipped']} |"
+               " | | | | | | | | | |")
             continue
         s = cfg.get("summary") or {}
         ps = cfg.get("ollama_ps") or {}
@@ -578,11 +528,16 @@ def write_report(raw: dict, path: str = "docs/optimization-report.md",
                    or "—")
         rss_mb = cfg.get("max_rss_kb", 0) / 1024.0
         model = (cfg.get("params", {}) or {}).get("model", "")
-        ap(f"| {name} | {_fmt(s.get('avg_time'))} | "
+        avg_t = s.get("avg_time")
+        avg_len = s.get("avg_len")
+        per100 = (avg_t / avg_len * 100) if avg_t and avg_len else None
+        cps = (avg_len / avg_t) if avg_t and avg_len else None
+        source = f" ({cfg['source_run']})" if cfg.get("source_run") else ""
+        ap(f"| {name}{source} | {_fmt(avg_t)} | "
            f"{_fmt(s.get('p95_time'))}"
            f"{'*' if s.get('p95_approx') else ''} | "
            f"{_fmt(s.get('tokens_per_sec_avg'), 1)} | "
-           f"{_fmt(s.get('avg_len'), 0)} | "
+           f"{_fmt(avg_len, 0)} | {_fmt(per100)} | {_fmt(cps, 1)} | "
            f"{_fmt(100 * float(s.get('accepted_share') or 0), 0)}% | "
            f"{rej_txt} | {model} | {ps.get('SIZE','—')} | "
            f"{ps.get('PROCESSOR','—')} | {rss_mb:.0f} |")
@@ -623,6 +578,9 @@ def write_report(raw: dict, path: str = "docs/optimization-report.md",
     ch = raw.get("choose_optimized") or {}
     ap(f"Итог: `{ch.get('name') or 'не выбран'}`")
     ap(f"Обоснование: {ch.get('why') or '—'}")
+    if raw.get("rule_change_note"):
+        ap("")
+        ap(f"Примечание: {raw['rule_change_note']}")
     chosen = chosen or {}
     if chosen:
         ap("Записанный пресет OPTIMIZED (modelsettings.py): "
